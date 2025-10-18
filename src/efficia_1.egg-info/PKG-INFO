@@ -1,0 +1,25 @@
+Metadata-Version: 2.1
+Name: efficia-1
+Version: 0.1.0
+Summary: EFFICIA-1: An efficient LLM architecture.
+Home-page: https://github.com/luxopes/efficia-1
+Author: Antonín Tomeček
+Author-email: bambiliarda@gmail.com
+Project-URL: Bug Tracker, https://github.com/luxopes/efficia-1/issues
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.6
+Description-Content-Type: text/markdown
+
+# EFFICIA-1
+
+EFFICIA-1: An efficient LLM architecture designed for long context, high efficiency, and fast inference.
+
+This repository contains the Python implementation of the EFFICIA-1 model.
+
+## Installation
+
+\`\`\`bash
+pip install -e .
+\`\`\`
