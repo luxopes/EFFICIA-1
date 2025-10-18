@@ -51,7 +51,7 @@ efficia-1/
 
 1.  **Clone the repository:**
     ```bash
-    git clone <repository-url>
+    git clone https://github.com/luxopes/EFFICIA-1.git
     cd efficia-1
     ```
 
