@@ -5,11 +5,11 @@ from torch.optim import AdamW
 import os
 import argparse
 from efficia_1.model import Efficia1
-import sentencepiece as spm
+from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 from torch.amp import GradScaler, autocast
 import torch.utils.checkpoint as checkpoint
-import unicodedata
 import re
+import unicodedata
 
 # --- 1. Konfigurace ---
 DIM = 832
@@ -26,31 +26,41 @@ EPOCHS = 1
 LEARNING_RATE = 3e-5
 CHECKPOINT_PATH = "efficia1_checkpoint.pth"
 DATASET_PATH = "dataset.txt"
-TOKENIZER_MODEL_PATH = "tokenizer.model"  # SentencePiece model
+TOKENIZER_PATH = "bpe_tokenizer.json"
 
 # --- 2. Zpracování dat ---
 def sanitize_text(text):
+    """Normalizuje text: zachová emojis, odstraní control characters."""
     text = unicodedata.normalize('NFKC', text)
     text = ''.join(ch for ch in text if unicodedata.category(ch)[0] != 'C' or ch in '\n\t')
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def train_tokenizer(input_file: str, model_path: str, vocab_size: int = 15000):
-    """Trénuje SentencePiece BPE tokenizer přímo ze souboru."""
-    if os.path.exists(model_path):
-        print(f"Tokenizer already exists at {model_path}. Skipping training.")
-        return
-    
-    print(f"Training SentencePiece tokenizer from {input_file}...")
-    spm.SentencePieceTrainer.train(
-        f'--input={input_file} --model_prefix={model_path.replace(".model", "")} '
-        f'--vocab_size={vocab_size} --model_type=bpe '
-        f'--character_coverage=1.0 --bos_id=0 --eos_id=1 --pad_id=-1 --unk_id=2 '
-        f'--split_by_unicode_script=true --split_digits=true'  # Lepší pro anglický text
-    )
-    print("Tokenizer training complete.")
+def chunk_generator(file_path, chunk_size=10**6):
+    """Generátor pro čtení souboru po chunkách."""
+    with open(file_path, 'r', encoding='utf-8') as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            yield sanitize_text(chunk)
 
-def get_text_and_vocab(file_path: str, use_bpe=True):
+def train_tokenizer(file_path, vocab_size=15000):
+    """Trénuje BPE tokenizer a ukládá ho."""
+    if os.path.exists(TOKENIZER_PATH):
+        print(f"Loading existing tokenizer from {TOKENIZER_PATH}")
+        return Tokenizer.from_file(TOKENIZER_PATH)
+    
+    tokenizer = Tokenizer(models.BPE())
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["[PAD]", "[UNK]"], min_frequency=2)
+    
+    tokenizer.train_from_iterator(chunk_generator(file_path), trainer)
+    tokenizer.save(TOKENIZER_PATH)
+    print(f"Tokenizer trained and saved to {TOKENIZER_PATH}")
+    return tokenizer
+
+def get_text_and_vocab(file_path, use_bpe=True):
     with open(file_path, 'r', encoding='utf-8') as f:
         text = sanitize_text(f.read())
     
@@ -59,17 +69,15 @@ def get_text_and_vocab(file_path: str, use_bpe=True):
         exit(1)
     
     if use_bpe:
-        train_tokenizer(file_path, TOKENIZER_MODEL_PATH)
-        tokenizer = spm.SentencePieceProcessor(model_file=TOKENIZER_MODEL_PATH)
-        vocab_size = tokenizer.vocab_size()
-        encoded_len = len(tokenizer.encode(text, out_type=int))
+        tokenizer = train_tokenizer(file_path)
+        vocab_size = tokenizer.get_vocab_size()
+        encoded_len = len(tokenizer.encode(text).ids)
         if encoded_len < SEQ_LEN:
             print(f"Error: Dataset too small ({encoded_len} tokens) for SEQ_LEN={SEQ_LEN}")
             exit(1)
         print(f"Total tokens after BPE tokenization: {encoded_len}")
         return text, tokenizer, vocab_size
     else:
-        # Char-level fallback
         chars = sorted(list(set(text)))
         vocab_size = len(chars)
         char_to_int = {ch: i for i, ch in enumerate(chars)}
@@ -77,19 +85,15 @@ def get_text_and_vocab(file_path: str, use_bpe=True):
         return text, (char_to_int, int_to_char), vocab_size
 
 class TextDataset(Dataset):
-    def __init__(self, text: str, tokenizer, seq_len: int, use_bpe=True, fraction: float = 0.01):
+    def __init__(self, text, tokenizer, seq_len, use_bpe=True):
         self.seq_len = seq_len
         self.use_bpe = use_bpe
-        # Použijeme zlomek dat
-        subset_len = int(len(text) * fraction)
-        text = text[:subset_len]
         if use_bpe:
             self.tokenizer = tokenizer
-            self.encoded_text = tokenizer.encode(text, out_type=int)
+            self.encoded_text = tokenizer.encode(text).ids
         else:
             self.char_to_int = tokenizer[0]
             self.encoded_text = [self.char_to_int[c] for c in text]
-        print(f"Dataset subset: {len(self.encoded_text)} tokens ({fraction*100:.0f}%)")
 
     def __len__(self):
         return len(self.encoded_text) - self.seq_len
@@ -124,9 +128,11 @@ def train(use_bpe=True):
 
     text, tokenizer, vocab_size = get_text_and_vocab(DATASET_PATH, use_bpe)
     
-    fraction = 0.01  # Rychlý test
-    dataset = TextDataset(text, tokenizer, SEQ_LEN, use_bpe, fraction)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
+    fraction = 0.01  # Sníženo pro rychlý test
+    subset_size = int(len(text) * fraction)
+    text = text[:subset_size]
+    encoded_len = len(tokenizer.encode(text).ids) if use_bpe else len(text)
+    print(f"Dataset loaded. Using {fraction*100:.0f}% of data ({encoded_len} tokens). Vocabulary size: {vocab_size}")
 
     model = Efficia1(
         num_tokens=vocab_size,
@@ -144,6 +150,9 @@ def train(use_bpe=True):
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model created with {num_params:,} parameters.")
     print(f"GPU memory after model creation: {torch.cuda.memory_allocated(device)/1e9:.2f} GiB")
+
+    dataset = TextDataset(text, tokenizer, SEQ_LEN, use_bpe)
+    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
 
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     criterion = nn.CrossEntropyLoss()
@@ -228,7 +237,7 @@ def train(use_bpe=True):
     torch.cuda.empty_cache()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train Efficia-1 model with SentencePiece")
-    parser.add_argument("--use_bpe", action="store_true", default=True, help="Use BPE tokenizer")
+    parser = argparse.ArgumentParser(description="Train Efficia-1 model")
+    parser.add_argument("--use_bpe", action="store_true", default=True, help="Use BPE tokenizer instead of char-level")
     args = parser.parse_args()
     train(use_bpe=args.use_bpe)
