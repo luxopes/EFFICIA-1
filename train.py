@@ -36,7 +36,17 @@ def sanitize_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
+def chunk_generator(file_path, chunk_size=10**6):
+    """Generátor pro čtení souboru po chunkách."""
+    with open(file_path, 'r', encoding='utf-8') as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            yield sanitize_text(chunk)
+
 def train_tokenizer(file_path, vocab_size=15000):
+    """Trénuje BPE tokenizer a ukládá ho."""
     if os.path.exists(TOKENIZER_PATH):
         print(f"Loading existing tokenizer from {TOKENIZER_PATH}")
         return Tokenizer.from_file(TOKENIZER_PATH)
@@ -45,9 +55,7 @@ def train_tokenizer(file_path, vocab_size=15000):
     tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
     trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["[PAD]", "[UNK]"], min_frequency=2)
     
-    with open(file_path, 'r', encoding='utf-8') as f:
-        text = [sanitize_text(f.read())]
-    tokenizer.train_from_iterator(text, trainer)
+    tokenizer.train_from_iterator(chunk_generator(file_path), trainer)
     tokenizer.save(TOKENIZER_PATH)
     print(f"Tokenizer trained and saved to {TOKENIZER_PATH}")
     return tokenizer
