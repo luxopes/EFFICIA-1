@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 import os
-from efficia_1 import Efficia1
+from efficia_1.model import Efficia1
 
 # --- 1. Konfigurace ---
 # Parametry modelu (upraveny pro menší VRAM nároky a rychlejší testování)
