@@ -8,6 +8,7 @@ from efficia_1.model import Efficia1
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 from torch.amp import GradScaler, autocast
 import torch.utils.checkpoint as checkpoint
+import re
 
 # --- 1. Konfigurace ---
 # Parametry modelu (pro ~160M parametrů, optimalizováno pro nízkou VRAM)
@@ -23,12 +24,17 @@ FF_MULT = 4
 BATCH_SIZE = 4
 SEQ_LEN = 256
 EPOCHS = 1
-LEARNING_RATE = 3e-5  # Sníženo pro stabilitu
+LEARNING_RATE = 1e-5
 CHECKPOINT_PATH = "efficia1_checkpoint.pth"
 DATASET_PATH = "dataset.txt"
 TOKENIZER_PATH = "bpe_tokenizer.json"
 
 # --- 2. Zpracování dat ---
+def sanitize_text(text):
+    """Odstraní problematické znaky z textu."""
+    text = re.sub(r'[^\x20-\x7E]', ' ', text)
+    return text
+
 def train_tokenizer(file_path, vocab_size=10000):
     """Trénuje BPE tokenizer a ukládá ho."""
     if os.path.exists(TOKENIZER_PATH):
@@ -40,7 +46,7 @@ def train_tokenizer(file_path, vocab_size=10000):
     trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["[PAD]", "[UNK]"])
     
     with open(file_path, 'r', encoding='utf-8') as f:
-        text = [f.read()]
+        text = [sanitize_text(f.read())]
     tokenizer.train_from_iterator(text, trainer)
     tokenizer.save(TOKENIZER_PATH)
     print(f"Tokenizer trained and saved to {TOKENIZER_PATH}")
@@ -49,7 +55,7 @@ def train_tokenizer(file_path, vocab_size=10000):
 def get_text_and_vocab(file_path, use_bpe=True):
     """Načte text a vrátí BPE nebo char-level tokenizer."""
     with open(file_path, 'r', encoding='utf-8') as f:
-        text = f.read()
+        text = sanitize_text(f.read())
     
     if use_bpe:
         tokenizer = train_tokenizer(file_path)
@@ -154,6 +160,7 @@ def train(use_bpe=True):
         model.train()
         total_loss = 0
         accum_count = 0
+        nan_steps = 0
 
         for i, (inputs, targets) in enumerate(dataloader):
             inputs, targets = inputs.to(device), targets.to(device)
@@ -181,21 +188,23 @@ def train(use_bpe=True):
                 accum_count = 0
                 continue
 
+            # Logování pro diagnostiku
+            if (i + 1) % 10 == 0:
+                max_logits = torch.max(torch.abs(logits)).item()
+                print(f"Epoch [{epoch+1}/{EPOCHS}], Step [{i+1}/{len(dataloader)}], Loss: {loss.item():.4f}, Max logits: {max_logits:.4f}")
+
             scaler.scale(loss).backward()
             accum_count += 1
 
             if accum_count == ACCUM_STEPS or i == len(dataloader) - 1:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)  # Zvýšená stabilita
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.25)
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
                 accum_count = 0
 
             total_loss += loss.item()
-            
-            if (i + 1) % 50 == 0:
-                print(f"Epoch [{epoch+1}/{EPOCHS}], Step [{i+1}/{len(dataloader)}], Loss: {loss.item():.4f}")
 
         avg_loss = total_loss / (len(dataloader) - nan_steps) if len(dataloader) > nan_steps else float('nan')
         print(f"--- End of Epoch [{epoch+1}/{EPOCHS}], Average Loss: {avg_loss:.4f}, NaN steps: {nan_steps} ---")
