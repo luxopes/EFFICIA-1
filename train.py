@@ -23,7 +23,7 @@ FF_MULT = 4
 BATCH_SIZE = 4
 SEQ_LEN = 256
 EPOCHS = 1
-LEARNING_RATE = 3e-5
+LEARNING_RATE = 1e-5  # Sníženo pro stabilitu
 CHECKPOINT_PATH = "efficia1_checkpoint.pth"
 DATASET_PATH = "dataset.txt"
 TOKENIZER_PATH = "bpe_tokenizer.json"
@@ -46,7 +46,6 @@ def chunk_generator(file_path, chunk_size=10**6):
             yield sanitize_text(chunk)
 
 def train_tokenizer(file_path, vocab_size=15000):
-    """Trénuje BPE tokenizer a ukládá ho."""
     if os.path.exists(TOKENIZER_PATH):
         print(f"Loading existing tokenizer from {TOKENIZER_PATH}")
         return Tokenizer.from_file(TOKENIZER_PATH)
@@ -107,11 +106,11 @@ class TextDataset(Dataset):
 def initialize_weights(model):
     for module in model.modules():
         if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight)
+            nn.init.normal_(module.weight, mean=0.0, std=0.01)  # Snížena std pro stabilitu
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            nn.init.normal_(module.weight, mean=0.0, std=0.01)  # Snížena std
 
 # --- 4. Tréninková smyčka ---
 def train(use_bpe=True):
@@ -128,11 +127,17 @@ def train(use_bpe=True):
 
     text, tokenizer, vocab_size = get_text_and_vocab(DATASET_PATH, use_bpe)
     
-    fraction = 0.01  # Sníženo pro rychlý test
+    fraction = 0.01  # 1 % dat pro rychlý test
     subset_size = int(len(text) * fraction)
     text = text[:subset_size]
     encoded_len = len(tokenizer.encode(text).ids) if use_bpe else len(text)
     print(f"Dataset loaded. Using {fraction*100:.0f}% of data ({encoded_len} tokens). Vocabulary size: {vocab_size}")
+
+    # Debug: Ověření tokenizace
+    sample_text = "Beginners BBQ Class Taking Place in Missoula!"
+    sample_tokens = tokenizer.encode(sample_text).ids
+    print(f"Sample tokens for '{sample_text}': {sample_tokens}")
+    print(f"Sample decoded: {tokenizer.decode(sample_tokens)}")
 
     model = Efficia1(
         num_tokens=vocab_size,
@@ -199,11 +204,13 @@ def train(use_bpe=True):
                 logits, global_memory, compressed_state = checkpoint.checkpoint(
                     lambda x, gm, cs: model(x, gm, cs), inputs, global_memory, compressed_state, use_reentrant=False
                 )
-                logits = torch.clamp(logits, min=-10.0, max=10.0)
+                logits = torch.clamp(logits, min=-10.0, max=10.0)  # Stabilizace logits
                 loss = criterion(logits.view(-1, vocab_size), targets.view(-1))
             
             if torch.isnan(loss) or torch.isinf(loss):
                 print(f"Warning: NaN/Inf loss detected at step {i+1}, skipping update")
+                print(f"Input sample: {inputs[0][:10].tolist()}")
+                print(f"Logits max: {torch.max(torch.abs(logits)).item()}")
                 nan_steps += 1
                 optimizer.zero_grad()
                 accum_count = 0
@@ -218,7 +225,7 @@ def train(use_bpe=True):
 
             if accum_count == ACCUM_STEPS or i == len(dataloader) - 1:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.25)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)  # Silnější clipping
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
