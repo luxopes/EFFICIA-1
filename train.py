@@ -69,10 +69,10 @@ def train():
     text, chars, vocab_size, char_to_int, int_to_char = get_text_and_vocab(DATASET_PATH)
     
     # Použijeme jen 5% dat pro zrychlení
-    subset_size = int(len(text) * 0.001)
+    subset_size = int(len(text) * 100)
     text = text[:subset_size]
     
-    print(f"Dataset loaded. Using 0.1% of data ({subset_size} characters). Vocabulary size: {vocab_size}")
+    print(f"Dataset loaded. Using 100% of data ({subset_size} characters). Vocabulary size: {vocab_size}")
 
     # Vytvoření modelu s dynamickou velikostí slovníku
     model = Efficia1(
