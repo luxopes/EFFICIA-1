@@ -6,20 +6,22 @@ import os
 import argparse
 from efficia_1.model import Efficia1
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+from torch.cuda.amp import GradScaler, autocast
+import torch.utils.checkpoint as checkpoint
 
 # --- 1. Konfigurace ---
-# Parametry modelu (pro ~160M parametrů)
-DIM = 768
+# Parametry modelu (pro ~160M parametrů, paměťově efektivní)
+DIM = 896
 DEPTH = 10
-HEADS = 12
-COMPRESSED_DIM = 384
+HEADS = 8
+COMPRESSED_DIM = 448
 WINDOW_SIZE = 512
 MEM_SIZE = 1024
 FF_MULT = 4
 
 # Tréninkové parametry
-BATCH_SIZE = 16
-SEQ_LEN = 1024
+BATCH_SIZE = 8
+SEQ_LEN = 512
 EPOCHS = 1
 LEARNING_RATE = 1e-4
 CHECKPOINT_PATH = "efficia1_checkpoint.pth"
@@ -27,7 +29,7 @@ DATASET_PATH = "dataset.txt"
 TOKENIZER_PATH = "bpe_tokenizer.json"
 
 # --- 2. Zpracování dat ---
-def train_tokenizer(file_path, vocab_size=30000):
+def train_tokenizer(file_path, vocab_size=15000):
     """Trénuje BPE tokenizer a ukládá ho."""
     if os.path.exists(TOKENIZER_PATH):
         print(f"Loading existing tokenizer from {TOKENIZER_PATH}")
@@ -96,14 +98,14 @@ def train(use_bpe=True):
     # Načtení dat a tokenizeru
     text, tokenizer, vocab_size = get_text_and_vocab(DATASET_PATH, use_bpe)
     
-    # Použijeme 5% dat (uprav fraction podle potřeby)
+    # Použijeme 5% dat
     fraction = 0.05
     subset_size = int(len(text) * fraction)
     text = text[:subset_size]
     encoded_len = len(tokenizer.encode(text).ids) if use_bpe else len(text)
     print(f"Dataset loaded. Using {fraction*100:.0f}% of data ({encoded_len} tokens). Vocabulary size: {vocab_size}")
 
-    # Vytvoření modelu
+    # Vytvoření modelu s gradient checkpointing
     model = Efficia1(
         num_tokens=vocab_size,
         dim=DIM,
@@ -122,12 +124,13 @@ def train(use_bpe=True):
     dataset = TextDataset(text, tokenizer, SEQ_LEN, use_bpe)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
 
-    # Optimizer a loss
+    # Optimizer, loss a mixed precision
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     criterion = nn.CrossEntropyLoss()
+    scaler = GradScaler()
 
     # Gradient accumulation
-    ACCUM_STEPS = 4
+    ACCUM_STEPS = 8
     total_loss = 0
     accum_count = 0
 
@@ -162,15 +165,21 @@ def train(use_bpe=True):
                     compressed_state = compressed_state.repeat(BATCH_SIZE, 1)
                 compressed_state = compressed_state.detach()
 
-            logits, global_memory, compressed_state = model(inputs, global_memory, compressed_state)
-            loss = criterion(logits.view(-1, vocab_size), targets.view(-1))
+            with autocast():
+                # Použijeme gradient checkpointing pro vrstvy
+                logits, global_memory, compressed_state = checkpoint.checkpoint(
+                    lambda x, gm, cs: model(x, gm, cs), inputs, global_memory, compressed_state, use_checkpoint=True
+                )
+                loss = criterion(logits.view(-1, vocab_size), targets.view(-1))
             
-            loss.backward()
+            scaler.scale(loss).backward()
             accum_count += 1
 
             if accum_count == ACCUM_STEPS or i == len(dataloader) - 1:
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 optimizer.zero_grad()
                 accum_count = 0
 
