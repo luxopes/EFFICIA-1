@@ -9,16 +9,16 @@ from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 
 # --- 1. Konfigurace ---
 # Parametry modelu (pro ~160M parametrů)
-DIM = 1024
-DEPTH = 12
-HEADS = 16
-COMPRESSED_DIM = 512
+DIM = 768
+DEPTH = 10
+HEADS = 12
+COMPRESSED_DIM = 384
 WINDOW_SIZE = 512
 MEM_SIZE = 1024
 FF_MULT = 4
 
 # Tréninkové parametry
-BATCH_SIZE = 32
+BATCH_SIZE = 16
 SEQ_LEN = 1024
 EPOCHS = 1
 LEARNING_RATE = 1e-4
@@ -82,6 +82,10 @@ class TextDataset(Dataset):
 
 # --- 3. Tréninková smyčka ---
 def train(use_bpe=True):
+    # Nastavení pro prevenci fragmentace paměti
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    torch.cuda.empty_cache()
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -123,7 +127,7 @@ def train(use_bpe=True):
     criterion = nn.CrossEntropyLoss()
 
     # Gradient accumulation
-    ACCUM_STEPS = 2
+    ACCUM_STEPS = 4
     total_loss = 0
     accum_count = 0
 
@@ -164,15 +168,11 @@ def train(use_bpe=True):
             loss.backward()
             accum_count += 1
 
-            if accum_count == ACCUM_STEPS:
+            if accum_count == ACCUM_STEPS or i == len(dataloader) - 1:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
                 accum_count = 0
-            elif i == len(dataloader) - 1:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-                optimizer.zero_grad()
 
             total_loss += loss.item()
             
@@ -186,6 +186,7 @@ def train(use_bpe=True):
         model.save_checkpoint(CHECKPOINT_PATH, optimizer, epoch + 1)
 
     print("Training finished.")
+    torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Efficia-1 model")
