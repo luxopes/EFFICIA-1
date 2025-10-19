@@ -9,7 +9,7 @@ from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 from torch.amp import GradScaler, autocast
 import torch.utils.checkpoint as checkpoint
 import re
-import unicodedata  # Pro normalizaci Unicode
+import unicodedata
 
 # --- 1. Konfigurace ---
 DIM = 832
@@ -31,11 +31,8 @@ TOKENIZER_PATH = "bpe_tokenizer.json"
 # --- 2. Zpracování dat ---
 def sanitize_text(text):
     """Normalizuje text: zachová emojis, odstraní control characters."""
-    # Normalizace Unicode (NFKC pro kompatibilitu, zachová emojis)
     text = unicodedata.normalize('NFKC', text)
-    # Odstraní control characters (kromě nových řádků/tabů)
     text = ''.join(ch for ch in text if unicodedata.category(ch)[0] != 'C' or ch in '\n\t')
-    # Nahradí vícenásobné mezery jednou
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
@@ -59,9 +56,17 @@ def get_text_and_vocab(file_path, use_bpe=True):
     with open(file_path, 'r', encoding='utf-8') as f:
         text = sanitize_text(f.read())
     
+    if not text.strip():
+        print(f"Error: Dataset file {file_path} is empty after sanitization")
+        exit(1)
+    
     if use_bpe:
         tokenizer = train_tokenizer(file_path)
         vocab_size = tokenizer.get_vocab_size()
+        encoded_len = len(tokenizer.encode(text).ids)
+        if encoded_len < SEQ_LEN:
+            print(f"Error: Dataset too small ({encoded_len} tokens) for SEQ_LEN={SEQ_LEN}")
+            exit(1)
         return text, tokenizer, vocab_size
     else:
         chars = sorted(list(set(text)))
@@ -214,7 +219,7 @@ def train(use_bpe=True):
 
         avg_loss = total_loss / (len(dataloader) - nan_steps) if len(dataloader) > nan_steps else float('nan')
         print(f"--- End of Epoch [{epoch+1}/{EPOCHS}], Average Loss: {avg_loss:.4f}, NaN steps: {nan_steps} ---")
-        print(f"GPU memory after epoch: {torch.cuda.memory_allocated(device)/1e9:.2f} GiB")
+        print(f"GPUParametry: memory after epoch: {torch.cuda.memory_allocated(device)/1e9:.2f} GiB")
 
         print("Saving checkpoint...")
         model.save_checkpoint(CHECKPOINT_PATH, optimizer, epoch + 1)
