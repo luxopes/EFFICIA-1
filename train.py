@@ -23,7 +23,7 @@ FF_MULT = 4
 BATCH_SIZE = 4
 SEQ_LEN = 256
 EPOCHS = 1
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 3e-5  # Sníženo pro stabilitu
 CHECKPOINT_PATH = "efficia1_checkpoint.pth"
 DATASET_PATH = "dataset.txt"
 TOKENIZER_PATH = "bpe_tokenizer.json"
@@ -135,6 +135,7 @@ def train(use_bpe=True):
     ACCUM_STEPS = 16
     total_loss = 0
     accum_count = 0
+    nan_steps = 0
 
     start_epoch = 0
     if os.path.exists(CHECKPOINT_PATH):
@@ -173,12 +174,19 @@ def train(use_bpe=True):
                 )
                 loss = criterion(logits.view(-1, vocab_size), targets.view(-1))
             
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"Warning: NaN/Inf loss detected at step {i+1}, skipping update")
+                nan_steps += 1
+                optimizer.zero_grad()
+                accum_count = 0
+                continue
+
             scaler.scale(loss).backward()
             accum_count += 1
 
             if accum_count == ACCUM_STEPS or i == len(dataloader) - 1:
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)  # Zvýšená stabilita
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
@@ -188,10 +196,10 @@ def train(use_bpe=True):
             
             if (i + 1) % 50 == 0:
                 print(f"Epoch [{epoch+1}/{EPOCHS}], Step [{i+1}/{len(dataloader)}], Loss: {loss.item():.4f}")
-                print(f"GPU memory: {torch.cuda.memory_allocated(device)/1e9:.2f} GiB")
 
-        avg_loss = total_loss / len(dataloader)
-        print(f"--- End of Epoch [{epoch+1}/{EPOCHS}], Average Loss: {avg_loss:.4f} ---")
+        avg_loss = total_loss / (len(dataloader) - nan_steps) if len(dataloader) > nan_steps else float('nan')
+        print(f"--- End of Epoch [{epoch+1}/{EPOCHS}], Average Loss: {avg_loss:.4f}, NaN steps: {nan_steps} ---")
+        print(f"GPU memory after epoch: {torch.cuda.memory_allocated(device)/1e9:.2f} GiB")
 
         print("Saving checkpoint...")
         model.save_checkpoint(CHECKPOINT_PATH, optimizer, epoch + 1)
