@@ -10,18 +10,18 @@ from torch.cuda.amp import GradScaler, autocast
 import torch.utils.checkpoint as checkpoint
 
 # --- 1. Konfigurace ---
-# Parametry modelu (pro ~160M parametrů, paměťově efektivní)
-DIM = 896
-DEPTH = 10
+# Parametry modelu (pro ~160M parametrů, optimalizováno pro nízkou VRAM)
+DIM = 832
+DEPTH = 12
 HEADS = 8
-COMPRESSED_DIM = 448
-WINDOW_SIZE = 512
-MEM_SIZE = 1024
+COMPRESSED_DIM = 416
+WINDOW_SIZE = 256
+MEM_SIZE = 512
 FF_MULT = 4
 
 # Tréninkové parametry
-BATCH_SIZE = 8
-SEQ_LEN = 512
+BATCH_SIZE = 4
+SEQ_LEN = 256
 EPOCHS = 1
 LEARNING_RATE = 1e-4
 CHECKPOINT_PATH = "efficia1_checkpoint.pth"
@@ -29,7 +29,7 @@ DATASET_PATH = "dataset.txt"
 TOKENIZER_PATH = "bpe_tokenizer.json"
 
 # --- 2. Zpracování dat ---
-def train_tokenizer(file_path, vocab_size=15000):
+def train_tokenizer(file_path, vocab_size=10000):
     """Trénuje BPE tokenizer a ukládá ho."""
     if os.path.exists(TOKENIZER_PATH):
         print(f"Loading existing tokenizer from {TOKENIZER_PATH}")
@@ -130,7 +130,7 @@ def train(use_bpe=True):
     scaler = GradScaler()
 
     # Gradient accumulation
-    ACCUM_STEPS = 8
+    ACCUM_STEPS = 16
     total_loss = 0
     accum_count = 0
 
@@ -166,7 +166,6 @@ def train(use_bpe=True):
                 compressed_state = compressed_state.detach()
 
             with autocast():
-                # Použijeme gradient checkpointing pro vrstvy
                 logits, global_memory, compressed_state = checkpoint.checkpoint(
                     lambda x, gm, cs: model(x, gm, cs), inputs, global_memory, compressed_state, use_checkpoint=True
                 )
