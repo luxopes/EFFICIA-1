@@ -9,9 +9,9 @@ from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 from torch.amp import GradScaler, autocast
 import torch.utils.checkpoint as checkpoint
 import re
+import unicodedata  # Pro normalizaci Unicode
 
 # --- 1. Konfigurace ---
-# Parametry modelu (pro ~160M parametrů, optimalizováno pro nízkou VRAM)
 DIM = 832
 DEPTH = 12
 HEADS = 8
@@ -20,30 +20,33 @@ WINDOW_SIZE = 256
 MEM_SIZE = 512
 FF_MULT = 4
 
-# Tréninkové parametry
 BATCH_SIZE = 4
 SEQ_LEN = 256
 EPOCHS = 1
-LEARNING_RATE = 1e-5
+LEARNING_RATE = 3e-5
 CHECKPOINT_PATH = "efficia1_checkpoint.pth"
 DATASET_PATH = "dataset.txt"
 TOKENIZER_PATH = "bpe_tokenizer.json"
 
 # --- 2. Zpracování dat ---
 def sanitize_text(text):
-    """Odstraní problematické znaky z textu."""
-    text = re.sub(r'[^\x20-\x7E]', ' ', text)
-    return text
+    """Normalizuje text: zachová emojis, odstraní control characters."""
+    # Normalizace Unicode (NFKC pro kompatibilitu, zachová emojis)
+    text = unicodedata.normalize('NFKC', text)
+    # Odstraní control characters (kromě nových řádků/tabů)
+    text = ''.join(ch for ch in text if unicodedata.category(ch)[0] != 'C' or ch in '\n\t')
+    # Nahradí vícenásobné mezery jednou
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
-def train_tokenizer(file_path, vocab_size=10000):
-    """Trénuje BPE tokenizer a ukládá ho."""
+def train_tokenizer(file_path, vocab_size=15000):
     if os.path.exists(TOKENIZER_PATH):
         print(f"Loading existing tokenizer from {TOKENIZER_PATH}")
         return Tokenizer.from_file(TOKENIZER_PATH)
     
     tokenizer = Tokenizer(models.BPE())
     tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["[PAD]", "[UNK]"])
+    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["[PAD]", "[UNK]"], min_frequency=2)
     
     with open(file_path, 'r', encoding='utf-8') as f:
         text = [sanitize_text(f.read())]
@@ -53,7 +56,6 @@ def train_tokenizer(file_path, vocab_size=10000):
     return tokenizer
 
 def get_text_and_vocab(file_path, use_bpe=True):
-    """Načte text a vrátí BPE nebo char-level tokenizer."""
     with open(file_path, 'r', encoding='utf-8') as f:
         text = sanitize_text(f.read())
     
@@ -69,7 +71,6 @@ def get_text_and_vocab(file_path, use_bpe=True):
         return text, (char_to_int, int_to_char), vocab_size
 
 class TextDataset(Dataset):
-    """Vytvoří dataset z textu tokenizovaného BPE nebo char-level."""
     def __init__(self, text, tokenizer, seq_len, use_bpe=True):
         self.seq_len = seq_len
         self.use_bpe = use_bpe
@@ -88,9 +89,18 @@ class TextDataset(Dataset):
         targets = torch.tensor(self.encoded_text[idx + 1 : idx + self.seq_len + 1], dtype=torch.long)
         return inputs, targets
 
-# --- 3. Tréninková smyčka ---
+# --- 3. Inicializace modelu ---
+def initialize_weights(model):
+    for module in model.modules():
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+# --- 4. Tréninková smyčka ---
 def train(use_bpe=True):
-    # Nastavení pro prevenci fragmentace paměti
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     torch.cuda.empty_cache()
     
@@ -102,17 +112,14 @@ def train(use_bpe=True):
         print(f"Error: Dataset file not found at {DATASET_PATH}")
         return
 
-    # Načtení dat a tokenizeru
     text, tokenizer, vocab_size = get_text_and_vocab(DATASET_PATH, use_bpe)
     
-    # Použijeme 5% dat
     fraction = 0.05
     subset_size = int(len(text) * fraction)
     text = text[:subset_size]
     encoded_len = len(tokenizer.encode(text).ids) if use_bpe else len(text)
     print(f"Dataset loaded. Using {fraction*100:.0f}% of data ({encoded_len} tokens). Vocabulary size: {vocab_size}")
 
-    # Vytvoření modelu s gradient checkpointing
     model = Efficia1(
         num_tokens=vocab_size,
         dim=DIM,
@@ -124,20 +131,19 @@ def train(use_bpe=True):
         ff_mult=FF_MULT
     ).to(device)
     
+    initialize_weights(model)
+    
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model created with {num_params:,} parameters.")
     print(f"GPU memory after model creation: {torch.cuda.memory_allocated(device)/1e9:.2f} GiB")
 
-    # Dataloader
     dataset = TextDataset(text, tokenizer, SEQ_LEN, use_bpe)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
 
-    # Optimizer, loss a mixed precision
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     criterion = nn.CrossEntropyLoss()
     scaler = GradScaler('cuda')
 
-    # Gradient accumulation
     ACCUM_STEPS = 16
     total_loss = 0
     accum_count = 0
@@ -179,6 +185,7 @@ def train(use_bpe=True):
                 logits, global_memory, compressed_state = checkpoint.checkpoint(
                     lambda x, gm, cs: model(x, gm, cs), inputs, global_memory, compressed_state, use_reentrant=False
                 )
+                logits = torch.clamp(logits, min=-10.0, max=10.0)
                 loss = criterion(logits.view(-1, vocab_size), targets.view(-1))
             
             if torch.isnan(loss) or torch.isinf(loss):
@@ -188,8 +195,7 @@ def train(use_bpe=True):
                 accum_count = 0
                 continue
 
-            # Logování pro diagnostiku
-            if (i + 1) % 10 == 0:
+            if (i + 1) % 5 == 0:
                 max_logits = torch.max(torch.abs(logits)).item()
                 print(f"Epoch [{epoch+1}/{EPOCHS}], Step [{i+1}/{len(dataloader)}], Loss: {loss.item():.4f}, Max logits: {max_logits:.4f}")
 
