@@ -6,7 +6,7 @@ import os
 import argparse
 from efficia_1.model import Efficia1
 from tokenizers import Tokenizer, models, pre_tokenizers, trainers
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 import torch.utils.checkpoint as checkpoint
 
 # --- 1. Konfigurace ---
@@ -90,6 +90,7 @@ def train(use_bpe=True):
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    print(f"Initial GPU memory allocated: {torch.cuda.memory_allocated(device)/1e9:.2f} GiB")
 
     if not os.path.exists(DATASET_PATH):
         print(f"Error: Dataset file not found at {DATASET_PATH}")
@@ -119,6 +120,7 @@ def train(use_bpe=True):
     
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model created with {num_params:,} parameters.")
+    print(f"GPU memory after model creation: {torch.cuda.memory_allocated(device)/1e9:.2f} GiB")
 
     # Dataloader
     dataset = TextDataset(text, tokenizer, SEQ_LEN, use_bpe)
@@ -127,7 +129,7 @@ def train(use_bpe=True):
     # Optimizer, loss a mixed precision
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     criterion = nn.CrossEntropyLoss()
-    scaler = GradScaler()
+    scaler = GradScaler('cuda')
 
     # Gradient accumulation
     ACCUM_STEPS = 16
@@ -165,9 +167,9 @@ def train(use_bpe=True):
                     compressed_state = compressed_state.repeat(BATCH_SIZE, 1)
                 compressed_state = compressed_state.detach()
 
-            with autocast():
+            with autocast('cuda'):
                 logits, global_memory, compressed_state = checkpoint.checkpoint(
-                    lambda x, gm, cs: model(x, gm, cs), inputs, global_memory, compressed_state, use_checkpoint=True
+                    lambda x, gm, cs: model(x, gm, cs), inputs, global_memory, compressed_state, use_reentrant=False
                 )
                 loss = criterion(logits.view(-1, vocab_size), targets.view(-1))
             
@@ -186,6 +188,7 @@ def train(use_bpe=True):
             
             if (i + 1) % 50 == 0:
                 print(f"Epoch [{epoch+1}/{EPOCHS}], Step [{i+1}/{len(dataloader)}], Loss: {loss.item():.4f}")
+                print(f"GPU memory: {torch.cuda.memory_allocated(device)/1e9:.2f} GiB")
 
         avg_loss = total_loss / len(dataloader)
         print(f"--- End of Epoch [{epoch+1}/{EPOCHS}], Average Loss: {avg_loss:.4f} ---")
