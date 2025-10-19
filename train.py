@@ -3,78 +3,103 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 import os
+import argparse
 from efficia_1.model import Efficia1
+from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 
 # --- 1. Konfigurace ---
-# Parametry modelu (upraveny pro menší VRAM nároky a rychlejší testování)
-DIM = 128
-DEPTH = 4
-HEADS = 4
-COMPRESSED_DIM = 64
-WINDOW_SIZE = 256
-MEM_SIZE = 512
+# Parametry modelu (pro ~160M parametrů)
+DIM = 1024
+DEPTH = 12
+HEADS = 16
+COMPRESSED_DIM = 512
+WINDOW_SIZE = 512
+MEM_SIZE = 1024
 FF_MULT = 4
 
 # Tréninkové parametry
-BATCH_SIZE = 8
-SEQ_LEN = 256 # Sníženo pro menší paměťové nároky
+BATCH_SIZE = 32
+SEQ_LEN = 1024
 EPOCHS = 1
 LEARNING_RATE = 1e-4
 CHECKPOINT_PATH = "efficia1_checkpoint.pth"
 DATASET_PATH = "dataset.txt"
+TOKENIZER_PATH = "bpe_tokenizer.json"
 
 # --- 2. Zpracování dat ---
-def get_text_and_vocab(file_path):
-    """Načte text ze souboru a vytvoří znakový slovník."""
+def train_tokenizer(file_path, vocab_size=30000):
+    """Trénuje BPE tokenizer a ukládá ho."""
+    if os.path.exists(TOKENIZER_PATH):
+        print(f"Loading existing tokenizer from {TOKENIZER_PATH}")
+        return Tokenizer.from_file(TOKENIZER_PATH)
+    
+    tokenizer = Tokenizer(models.BPE())
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["[PAD]", "[UNK]"])
+    
+    with open(file_path, 'r', encoding='utf-8') as f:
+        text = [f.read()]
+    tokenizer.train_from_iterator(text, trainer)
+    tokenizer.save(TOKENIZER_PATH)
+    print(f"Tokenizer trained and saved to {TOKENIZER_PATH}")
+    return tokenizer
+
+def get_text_and_vocab(file_path, use_bpe=True):
+    """Načte text a vrátí BPE nebo char-level tokenizer."""
     with open(file_path, 'r', encoding='utf-8') as f:
         text = f.read()
     
-    chars = sorted(list(set(text)))
-    vocab_size = len(chars)
-    
-    char_to_int = {ch: i for i, ch in enumerate(chars)}
-    int_to_char = {i: ch for i, ch in enumerate(chars)}
-    
-    return text, chars, vocab_size, char_to_int, int_to_char
+    if use_bpe:
+        tokenizer = train_tokenizer(file_path)
+        vocab_size = tokenizer.get_vocab_size()
+        return text, tokenizer, vocab_size
+    else:
+        chars = sorted(list(set(text)))
+        vocab_size = len(chars)
+        char_to_int = {ch: i for i, ch in enumerate(chars)}
+        int_to_char = {i: ch for i, ch in enumerate(chars)}
+        return text, (char_to_int, int_to_char), vocab_size
 
 class TextDataset(Dataset):
-    """Vytvoří dataset z textového souboru."""
-    def __init__(self, text, char_to_int, seq_len):
+    """Vytvoří dataset z textu tokenizovaného BPE nebo char-level."""
+    def __init__(self, text, tokenizer, seq_len, use_bpe=True):
         self.seq_len = seq_len
-        self.char_to_int = char_to_int
-        self.encoded_text = [self.char_to_int[c] for c in text]
+        self.use_bpe = use_bpe
+        if use_bpe:
+            self.tokenizer = tokenizer
+            self.encoded_text = tokenizer.encode(text).ids
+        else:
+            self.char_to_int = tokenizer[0]
+            self.encoded_text = [self.char_to_int[c] for c in text]
 
     def __len__(self):
-        # Počet možných sekvencí
         return len(self.encoded_text) - self.seq_len
 
     def __getitem__(self, idx):
-        # Vstupní sekvence
         inputs = torch.tensor(self.encoded_text[idx : idx + self.seq_len], dtype=torch.long)
-        # Cílová sekvence (posunutá o jeden token)
         targets = torch.tensor(self.encoded_text[idx + 1 : idx + self.seq_len + 1], dtype=torch.long)
         return inputs, targets
 
 # --- 3. Tréninková smyčka ---
-def train():
+def train(use_bpe=True):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Načtení dat a vytvoření slovníku
     if not os.path.exists(DATASET_PATH):
         print(f"Error: Dataset file not found at {DATASET_PATH}")
         return
-        
-    
-    text, chars, vocab_size, char_to_int, int_to_char = get_text_and_vocab(DATASET_PATH)
-    
-    # Použijeme jen 5% dat pro zrychlení
-    subset_size = int(len(text) * 100)
-    text = text[:subset_size]
-    
-    print(f"Dataset loaded. Using 100% of data ({subset_size} characters). Vocabulary size: {vocab_size}")
 
-    # Vytvoření modelu s dynamickou velikostí slovníku
+    # Načtení dat a tokenizeru
+    text, tokenizer, vocab_size = get_text_and_vocab(DATASET_PATH, use_bpe)
+    
+    # Použijeme 5% dat (uprav fraction podle potřeby)
+    fraction = 0.05
+    subset_size = int(len(text) * fraction)
+    text = text[:subset_size]
+    encoded_len = len(tokenizer.encode(text).ids) if use_bpe else len(text)
+    print(f"Dataset loaded. Using {fraction*100:.0f}% of data ({encoded_len} tokens). Vocabulary size: {vocab_size}")
+
+    # Vytvoření modelu
     model = Efficia1(
         num_tokens=vocab_size,
         dim=DIM,
@@ -90,15 +115,19 @@ def train():
     print(f"Model created with {num_params:,} parameters.")
 
     # Dataloader
-    dataset = TextDataset(text, char_to_int, SEQ_LEN)
+    dataset = TextDataset(text, tokenizer, SEQ_LEN, use_bpe)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
 
-    # Optimizer a loss funkce
+    # Optimizer a loss
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     criterion = nn.CrossEntropyLoss()
 
+    # Gradient accumulation
+    ACCUM_STEPS = 2
+    total_loss = 0
+    accum_count = 0
+
     start_epoch = 0
-    # Možnost načíst checkpoint
     if os.path.exists(CHECKPOINT_PATH):
         print(f"Loading checkpoint from {CHECKPOINT_PATH}")
         try:
@@ -108,23 +137,20 @@ def train():
             print(f"Could not load checkpoint: {e}. Starting from scratch.")
             start_epoch = 0
 
-
-    # Inicializace stavů
     global_memory = None
     compressed_state = None
 
     for epoch in range(start_epoch, EPOCHS):
         model.train()
         total_loss = 0
+        accum_count = 0
 
         for i, (inputs, targets) in enumerate(dataloader):
             inputs, targets = inputs.to(device), targets.to(device)
             
-            # Důležité: Odpojení stavů od grafu výpočtů z předchozí iterace
             if global_memory is not None:
-                # Zajistíme správnou velikost batch dimenze pro stavy
                 if global_memory.size(0) != BATCH_SIZE:
-                     global_memory = global_memory.repeat(BATCH_SIZE, 1, 1)
+                    global_memory = global_memory.repeat(BATCH_SIZE, 1, 1)
                 global_memory = global_memory.detach()
 
             if compressed_state is not None:
@@ -132,19 +158,21 @@ def train():
                     compressed_state = compressed_state.repeat(BATCH_SIZE, 1)
                 compressed_state = compressed_state.detach()
 
-
-            # Dopředný průchod
             logits, global_memory, compressed_state = model(inputs, global_memory, compressed_state)
-            
-            # Výpočet loss
-            # Logits mají tvar [batch, seq_len, num_tokens], loss je očekává ve tvaru [batch * seq_len, num_tokens]
             loss = criterion(logits.view(-1, vocab_size), targets.view(-1))
             
-            # Zpětná propagace
-            optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # Ořezání gradientů
-            optimizer.step()
+            accum_count += 1
+
+            if accum_count == ACCUM_STEPS:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+                accum_count = 0
+            elif i == len(dataloader) - 1:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
 
             total_loss += loss.item()
             
@@ -154,11 +182,13 @@ def train():
         avg_loss = total_loss / len(dataloader)
         print(f"--- End of Epoch [{epoch+1}/{EPOCHS}], Average Loss: {avg_loss:.4f} ---")
 
-        # Uložení checkpointu
         print("Saving checkpoint...")
         model.save_checkpoint(CHECKPOINT_PATH, optimizer, epoch + 1)
 
     print("Training finished.")
 
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser(description="Train Efficia-1 model")
+    parser.add_argument("--use_bpe", action="store_true", default=True, help="Use BPE tokenizer instead of char-level")
+    args = parser.parse_args()
+    train(use_bpe=args.use_bpe)
