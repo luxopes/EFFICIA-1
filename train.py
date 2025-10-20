@@ -127,7 +127,7 @@ def train(use_bpe=True):
 
     text, tokenizer, vocab_size = get_text_and_vocab(DATASET_PATH, use_bpe)
     
-    fraction = 0.01  # 1 % dat pro rychlý test
+    fraction = 0.1  # 10 % dat pro rychlý test
     subset_size = int(len(text) * fraction)
     text = text[:subset_size]
     encoded_len = len(tokenizer.encode(text).ids) if use_bpe else len(text)
