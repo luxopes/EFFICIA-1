@@ -16,13 +16,14 @@ MEM_SIZE = 1024
 FF_MULT = 6            
 
 # --- 2. Training ---
-BATCH_SIZE = 16         
+BATCH_SIZE = 16         # malý batch pro VRAM
 SEQ_LEN = 512        
 EPOCHS = 1             
 LEARNING_RATE = 2e-4   
 CHECKPOINT_PATH = "efficia1_checkpoint_large.pth"
 DATASET_PATH = "dataset.txt"
 MAX_CKPTS = 3          
+ACCUMULATION_STEPS = 4  # počet batchů, které se akumulují před update
 
 # --- 2. Zpracování dat ---
 def get_text_and_vocab(file_path):
@@ -48,14 +49,12 @@ class TextDataset(Dataset):
         targets = torch.tensor(self.encoded_text[idx + 1: idx + self.seq_len + 1], dtype=torch.long)
         return inputs, targets
 
-# --- Pomocná funkce pro mazání starých checkpointů ---
 def manage_checkpoints(pattern="checkpoint_step_*.pth", max_ckpts=3):
     files = sorted(glob(pattern), key=os.path.getmtime)
     while len(files) > max_ckpts:
         os.remove(files[0])
         files.pop(0)
 
-# --- 3. Tréninková smyčka ---
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -66,13 +65,11 @@ def train():
 
     text, chars, vocab_size, char_to_int, int_to_char = get_text_and_vocab(DATASET_PATH)
 
-    # Použijeme jen 10% dat pro rychlý test
     subset_size = int(len(text) * 0.1)
     text = text[:subset_size]
 
     print(f"Dataset loaded. Using 10% of data ({subset_size} characters). Vocabulary size: {vocab_size}")
 
-    # Vytvoření modelu
     model = Efficia1(
         num_tokens=vocab_size,
         dim=DIM,
@@ -113,11 +110,12 @@ def train():
         model.train()
         total_loss = 0
 
+        optimizer.zero_grad()  # důležité pro accumulation
+
         for i, (inputs, targets) in enumerate(dataloader):
-            step = epoch * steps_per_epoch + i + 1  # globální krok
+            step = epoch * steps_per_epoch + i + 1
             inputs, targets = inputs.to(device), targets.to(device)
 
-            # Odpojení předchozích stavů
             if global_memory is not None:
                 if global_memory.size(0) != BATCH_SIZE:
                     global_memory = global_memory.repeat(BATCH_SIZE, 1, 1)
@@ -128,26 +126,21 @@ def train():
                     compressed_state = compressed_state.repeat(BATCH_SIZE, 1)
                 compressed_state = compressed_state.detach()
 
-            # Dopředný průchod
             logits, global_memory, compressed_state = model(inputs, global_memory, compressed_state)
-
-            # Výpočet loss
             loss = criterion(logits.view(-1, vocab_size), targets.view(-1))
-
-            # Backprop
-            optimizer.zero_grad()
+            loss = loss / ACCUMULATION_STEPS  # normalizace pro gradient accumulation
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            total_loss += loss.item() * ACCUMULATION_STEPS  # pro správné průměrování
 
-            total_loss += loss.item()
+            if (i + 1) % ACCUMULATION_STEPS == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                optimizer.zero_grad()
 
-            # Logování
             if step % 50 == 0:
                 print(f"Epoch [{epoch+1}/{EPOCHS}], Step [{i+1}/{steps_per_epoch}], "
-                      f"Global Step [{step}/{total_steps}], Loss: {loss.item():.4f}")
+                      f"Global Step [{step}/{total_steps}], Loss: {loss.item() * ACCUMULATION_STEPS:.4f}")
 
-            # 💾 Checkpoint každých 10 000 kroků
             if step % 10000 == 0:
                 ckpt_path = f"checkpoint_step_{step}.pth"
                 print(f"Saving checkpoint at step {step} → {ckpt_path}")
@@ -156,8 +149,6 @@ def train():
 
         avg_loss = total_loss / len(dataloader)
         print(f"--- End of Epoch [{epoch+1}/{EPOCHS}], Average Loss: {avg_loss:.4f} ---")
-
-        # Uložení epoch checkpointu
         print("Saving epoch checkpoint...")
         model.save_checkpoint(CHECKPOINT_PATH, optimizer, epoch + 1)
 
