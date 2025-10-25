@@ -16,7 +16,7 @@ MEM_SIZE = 1024
 FF_MULT = 6            
 
 # --- 2. Training ---
-BATCH_SIZE = 16         # malý batch pro VRAM
+BATCH_SIZE = 24         # malý batch pro VRAM
 SEQ_LEN = 512        
 EPOCHS = 1             
 LEARNING_RATE = 2e-4   
