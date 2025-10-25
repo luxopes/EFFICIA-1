@@ -7,39 +7,34 @@ from glob import glob
 from efficia_1.model import Efficia1
 
 # --- 1. Model configuration ---
-DIM = 384              # výrazně větší kapacita reprezentací
-DEPTH = 8              # hlubší model, lepší generalizace
-HEADS = 8              # DIM musí být dělitelné počtem heads
-COMPRESSED_DIM = 192   # ~DIM/2 pro efektivní kompresi
+DIM = 384              
+DEPTH = 8              
+HEADS = 8              
+COMPRESSED_DIM = 192   
 WINDOW_SIZE = 256
-MEM_SIZE = 1024        # zvětšení paměti pro lepší dlouhodobý kontext
-FF_MULT = 6            # silnější feed-forward vrstvy
+MEM_SIZE = 1024        
+FF_MULT = 6            
 
 # --- 2. Training ---
-BATCH_SIZE = 8         # vyšší by asi přetekl VRAM
-SEQ_LEN = 512          # maximum, co P100 zvládne při DIM=384
-EPOCHS = 1             # pro stabilní konvergenci
-LEARNING_RATE = 2e-4   # vhodné pro větší model, můžeš použít scheduler
+BATCH_SIZE = 8         
+SEQ_LEN = 512          
+EPOCHS = 1             
+LEARNING_RATE = 2e-4   
 CHECKPOINT_PATH = "efficia1_checkpoint_large.pth"
 DATASET_PATH = "dataset.txt"
-MAX_CKPTS = 3          # kolik checkpointů uchovat při mazání starých
+MAX_CKPTS = 3          
 
 # --- 2. Zpracování dat ---
 def get_text_and_vocab(file_path):
-    """Načte text ze souboru a vytvoří znakový slovník."""
     with open(file_path, 'r', encoding='utf-8') as f:
         text = f.read()
-    
     chars = sorted(list(set(text)))
     vocab_size = len(chars)
-    
     char_to_int = {ch: i for i, ch in enumerate(chars)}
     int_to_char = {i: ch for i, ch in enumerate(chars)}
-    
     return text, chars, vocab_size, char_to_int, int_to_char
 
 class TextDataset(Dataset):
-    """Vytvoří dataset z textového souboru."""
     def __init__(self, text, char_to_int, seq_len):
         self.seq_len = seq_len
         self.char_to_int = char_to_int
@@ -49,8 +44,8 @@ class TextDataset(Dataset):
         return len(self.encoded_text) - self.seq_len
 
     def __getitem__(self, idx):
-        inputs = torch.tensor(self.encoded_text[idx : idx + self.seq_len], dtype=torch.long)
-        targets = torch.tensor(self.encoded_text[idx + 1 : idx + self.seq_len + 1], dtype=torch.long)
+        inputs = torch.tensor(self.encoded_text[idx: idx + self.seq_len], dtype=torch.long)
+        targets = torch.tensor(self.encoded_text[idx + 1: idx + self.seq_len + 1], dtype=torch.long)
         return inputs, targets
 
 # --- Pomocná funkce pro mazání starých checkpointů ---
@@ -95,6 +90,9 @@ def train():
     dataset = TextDataset(text, char_to_int, SEQ_LEN)
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
 
+    steps_per_epoch = len(dataloader)
+    total_steps = EPOCHS * steps_per_epoch
+
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     criterion = nn.CrossEntropyLoss()
 
@@ -116,7 +114,7 @@ def train():
         total_loss = 0
 
         for i, (inputs, targets) in enumerate(dataloader):
-            step = epoch * len(dataloader) + i + 1  # globální číslo kroku
+            step = epoch * steps_per_epoch + i + 1  # globální krok
             inputs, targets = inputs.to(device), targets.to(device)
 
             # Odpojení předchozích stavů
@@ -146,7 +144,8 @@ def train():
 
             # Logování
             if step % 50 == 0:
-                print(f"Epoch [{epoch+1}/{EPOCHS}], Step [{step}], Loss: {loss.item():.4f}")
+                print(f"Epoch [{epoch+1}/{EPOCHS}], Step [{i+1}/{steps_per_epoch}], "
+                      f"Global Step [{step}/{total_steps}], Loss: {loss.item():.4f}")
 
             # 💾 Checkpoint každých 10 000 kroků
             if step % 10000 == 0:
