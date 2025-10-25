@@ -5,6 +5,24 @@ from torch.optim import AdamW
 import os
 from efficia_1.model import Efficia1
 
+# --- 1. Model configuration ---
+DIM = 384              # výrazně větší kapacita reprezentací
+DEPTH = 8              # hlubší model, lepší generalizace
+HEADS = 8              # DIM musí být dělitelné počtem heads
+COMPRESSED_DIM = 192   # ~DIM/2 pro efektivní kompresi
+WINDOW_SIZE = 256
+MEM_SIZE = 1024        # zvětšení paměti pro lepší dlouhodobý kontext
+FF_MULT = 6            # silnější feed-forward vrstvy
+
+# --- 2. Training ---
+BATCH_SIZE = 8         # vyšší by asi přetekl VRAM
+SEQ_LEN = 512          # maximum, co P100 zvládne při DIM=384
+EPOCHS = 5–10          # pro stabilní konvergenci
+LEARNING_RATE = 2e-4   # vhodné pro větší model, můžeš použít scheduler
+CHECKPOINT_PATH = "efficia1_checkpoint_large.pth"
+DATASET_PATH = "dataset.txt"
+
+'''
 # --- 1. Konfigurace ---
 # Parametry modelu (upraveny pro menší VRAM nároky a rychlejší testování)
 DIM = 128
@@ -22,6 +40,7 @@ EPOCHS = 1
 LEARNING_RATE = 1e-4
 CHECKPOINT_PATH = "efficia1_checkpoint.pth"
 DATASET_PATH = "dataset.txt"
+'''
 
 # --- 2. Zpracování dat ---
 def get_text_and_vocab(file_path):
