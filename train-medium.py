@@ -16,14 +16,14 @@ MEM_SIZE = 1024
 FF_MULT = 6            
 
 # --- 2. Training ---
-BATCH_SIZE = 16         # malý batch pro VRAM
+BATCH_SIZE = 16        
 SEQ_LEN = 512        
 EPOCHS = 1             
 LEARNING_RATE = 2e-4   
 CHECKPOINT_PATH = "efficia1_checkpoint_large.pth"
 DATASET_PATH = "dataset.txt"
 MAX_CKPTS = 3          
-ACCUMULATION_STEPS = 4  # počet batchů, které se akumulují před update
+ACCUMULATION_STEPS = 4  # počet mini-batchů pro akumulaci gradientů
 
 # --- 2. Zpracování dat ---
 def get_text_and_vocab(file_path):
@@ -65,7 +65,7 @@ def train():
 
     text, chars, vocab_size, char_to_int, int_to_char = get_text_and_vocab(DATASET_PATH)
 
-    subset_size = int(len(text) * 0.1)
+    subset_size = int(len(text) * 0.1)  # testovací subset
     text = text[:subset_size]
 
     print(f"Dataset loaded. Using 10% of data ({subset_size} characters). Vocabulary size: {vocab_size}")
@@ -88,12 +88,14 @@ def train():
     dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
 
     steps_per_epoch = len(dataloader)
-    total_steps = EPOCHS * steps_per_epoch
+    total_steps_for_optimizer = (steps_per_epoch * EPOCHS) // ACCUMULATION_STEPS
 
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     criterion = nn.CrossEntropyLoss()
 
     start_epoch = 0
+    global_step = 0  # počet optimizer update kroků
+
     if os.path.exists(CHECKPOINT_PATH):
         print(f"Loading checkpoint from {CHECKPOINT_PATH}")
         try:
@@ -110,10 +112,9 @@ def train():
         model.train()
         total_loss = 0
 
-        optimizer.zero_grad()  # důležité pro accumulation
+        optimizer.zero_grad()
 
         for i, (inputs, targets) in enumerate(dataloader):
-            step = epoch * steps_per_epoch + i + 1
             inputs, targets = inputs.to(device), targets.to(device)
 
             if global_memory is not None:
@@ -128,26 +129,27 @@ def train():
 
             logits, global_memory, compressed_state = model(inputs, global_memory, compressed_state)
             loss = criterion(logits.view(-1, vocab_size), targets.view(-1))
-            loss = loss / ACCUMULATION_STEPS  # normalizace pro gradient accumulation
+            loss = loss / ACCUMULATION_STEPS
             loss.backward()
-            total_loss += loss.item() * ACCUMULATION_STEPS  # pro správné průměrování
+            total_loss += loss.item() * ACCUMULATION_STEPS
 
             if (i + 1) % ACCUMULATION_STEPS == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
+                global_step += 1  # skutečný krok optimizeru
 
-            if step % 50 == 0:
-                print(f"Epoch [{epoch+1}/{EPOCHS}], Step [{i+1}/{steps_per_epoch}], "
-                      f"Global Step [{step}/{total_steps}], Loss: {loss.item() * ACCUMULATION_STEPS:.4f}")
+                if global_step % 50 == 0:
+                    print(f"Epoch [{epoch+1}/{EPOCHS}], Global Step [{global_step}/{total_steps_for_optimizer}], "
+                          f"Loss: {total_loss / (global_step*ACCUMULATION_STEPS):.4f}")
 
-            if step % 10000 == 0:
-                ckpt_path = f"checkpoint_step_{step}.pth"
-                print(f"Saving checkpoint at step {step} → {ckpt_path}")
-                model.save_checkpoint(ckpt_path, optimizer, epoch + 1)
-                manage_checkpoints(max_ckpts=MAX_CKPTS)
+                if global_step % 10000 == 0:
+                    ckpt_path = f"checkpoint_step_{global_step}.pth"
+                    print(f"Saving checkpoint at step {global_step} → {ckpt_path}")
+                    model.save_checkpoint(ckpt_path, optimizer, epoch + 1)
+                    manage_checkpoints(max_ckpts=MAX_CKPTS)
 
-        avg_loss = total_loss / len(dataloader)
+        avg_loss = total_loss / steps_per_epoch
         print(f"--- End of Epoch [{epoch+1}/{EPOCHS}], Average Loss: {avg_loss:.4f} ---")
         print("Saving epoch checkpoint...")
         model.save_checkpoint(CHECKPOINT_PATH, optimizer, epoch + 1)
