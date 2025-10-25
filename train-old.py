@@ -17,7 +17,7 @@ FF_MULT = 6            # silnější feed-forward vrstvy
 # --- 2. Training ---
 BATCH_SIZE = 8         # vyšší by asi přetekl VRAM
 SEQ_LEN = 512          # maximum, co P100 zvládne při DIM=384
-EPOCHS = 5–10          # pro stabilní konvergenci
+EPOCHS = 1          # pro stabilní konvergenci
 LEARNING_RATE = 2e-4   # vhodné pro větší model, můžeš použít scheduler
 CHECKPOINT_PATH = "efficia1_checkpoint_large.pth"
 DATASET_PATH = "dataset.txt"
