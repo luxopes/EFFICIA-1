@@ -17,7 +17,7 @@ FF_MULT = 6
 
 # --- 2. Training ---
 BATCH_SIZE = 16         
-SEQ_LEN = 1024         
+SEQ_LEN = 512        
 EPOCHS = 1             
 LEARNING_RATE = 2e-4   
 CHECKPOINT_PATH = "efficia1_checkpoint_large.pth"
