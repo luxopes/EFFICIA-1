@@ -10,7 +10,7 @@ from efficia_1.model import Efficia1
 DIM = 128
 DEPTH = 4
 HEADS = 4
-COMPRESSED_DIM = 64
+COMPRESSED_DIM = 96
 WINDOW_SIZE = 256
 MEM_SIZE = 512
 FF_MULT = 4
