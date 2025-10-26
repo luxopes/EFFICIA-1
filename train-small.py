@@ -16,7 +16,7 @@ MEM_SIZE = 512
 FF_MULT = 4
 
 # Tréninkové parametry
-BATCH_SIZE = 8
+BATCH_SIZE = 64
 SEQ_LEN = 256 # Sníženo pro menší paměťové nároky
 EPOCHS = 1
 LEARNING_RATE = 1e-4
